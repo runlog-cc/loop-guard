@@ -1,0 +1,36 @@
+{
+  "name": "@runlog/loopguard",
+  "version": "0.1.0",
+  "description": "Real-time AI agent circuit breaker and loop prevention SDK.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "bun test"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "circuit-breaker",
+    "openai",
+    "anthropic",
+    "langgraph",
+    "llm-guard"
+  ],
+  "author": "RunLog <hello@runlog.cc>",
+  "license": "MIT",
+  "type": "commonjs",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "@types/node": "22.15.3"
+  }
+}

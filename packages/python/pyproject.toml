@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runlog-loopguard"
+version = "0.1.0"
+description = "Lightweight drop-in circuit breaker preventing AI agent tool retry loops and token overspending."
+readme = "README.md"
+authors = [{ name = "RunLog", email = "hello@runlog.cc" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+all = ["openai", "anthropic", "langchain-core", "fastapi", "uvicorn"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["loopguard*"]
