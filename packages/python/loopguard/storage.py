@@ -1,6 +1,7 @@
 """Local storage backend for Loop-Guard sessions and tool events."""
 
 import json
+import threading
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,7 @@ class SessionStore:
     """Stores session execution telemetry in memory and optional SQLite."""
 
     def __init__(self, db_path: Optional[str] = None):
+        self._lock = threading.RLock()
         self.db_path = db_path
         self._memory_sessions: Dict[str, Dict[str, Any]] = {}
         if self.db_path:
@@ -37,7 +39,10 @@ class SessionStore:
         if not session_id:
             return
 
-        self._memory_sessions[session_id] = session_data
+        with self._lock:
+            self._memory_sessions[session_id] = session_data
+            while len(self._memory_sessions) > 100:
+                del self._memory_sessions[next(iter(self._memory_sessions))]
 
         if self.db_path:
             try:
@@ -83,6 +88,7 @@ class SessionStore:
 
     def list_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
         # Return newest first
-        sessions = list(self._memory_sessions.values())
+        with self._lock:
+            sessions = list(self._memory_sessions.values())
         sessions.reverse()
         return sessions[:limit]

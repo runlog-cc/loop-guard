@@ -1,6 +1,6 @@
 {
   "name": "@runlog/loopguard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Real-time AI agent circuit breaker and loop prevention SDK.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

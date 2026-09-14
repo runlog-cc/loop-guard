@@ -13,6 +13,7 @@ from loopguard import (
     BudgetExceededError,
     MaxDepthExceededError,
     wrap_openai,
+    wrap_anthropic,
     LoopGuardCallbackHandler,
 )
 
@@ -179,11 +180,177 @@ class TestLoopGuard(unittest.TestCase):
 
         r1 = client.chat.completions.create(model="gpt-4o", messages=[])
         self.assertIsInstance(r1, DummyResponse)
+        cb.before_tool_call("search_tool", '{"query": "test"}')
         cb.after_tool_call("search_tool", '{"query": "test"}', result="empty")
 
         r2 = client.chat.completions.create(model="gpt-4o", messages=[])
         self.assertIsInstance(r2, dict)
         self.assertTrue(r2["loopguard_status"]["tripped"])
+
+    def test_openai_wrapper_records_observed_requests_without_tool_results(self):
+        class ToolResponse:
+            def __init__(self, name, arguments):
+                function = type("Function", (), {"name": name, "arguments": arguments})()
+                tool_call = type("ToolCall", (), {"function": function})()
+                message = type("Message", (), {"tool_calls": [tool_call]})()
+                self.choices = [type("Choice", (), {"message": message})()]
+                self.usage = None
+
+        class Completions:
+            calls = 0
+            def create(self, *args, **kwargs):
+                self.calls += 1
+                return ToolResponse("lookup", '{"b": 2, "a": 1}')
+
+        completions = Completions()
+        client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
+        guard = CircuitBreaker(policy=TripPolicy(max_consecutive_retries=3, fallback_mode="synthetic_response"))
+        wrapped = wrap_openai(client, guard)
+
+        self.assertIsInstance(wrapped.chat.completions.create(model="gpt-4o"), ToolResponse)
+        self.assertIsInstance(wrapped.chat.completions.create(model="gpt-4o"), ToolResponse)
+        blocked = wrapped.chat.completions.create(model="gpt-4o")
+
+        self.assertTrue(blocked["loopguard_status"]["tripped"])
+        self.assertEqual(completions.calls, 3)
+        self.assertEqual(len(guard.history), 0)
+        self.assertEqual(len(guard.signatures), 0)
+        self.assertEqual(len(guard.observed_signatures), 3)
+
+    def test_observed_request_depth_limit_blocks_distinct_requests(self):
+        guard = CircuitBreaker(policy=TripPolicy(max_depth=2, fallback_mode="synthetic_response"))
+
+        self.assertIsNone(guard.observe_tool_request("first", {}))
+        self.assertIsNone(guard.observe_tool_request("second", {}))
+        blocked = guard.observe_tool_request("third", {})
+
+        self.assertTrue(blocked["loopguard_status"]["tripped"])
+        self.assertEqual(guard.trip_reason, TripReason.MAX_DEPTH_EXCEEDED)
+        self.assertEqual(len(guard.observed_signatures), 3)
+        self.assertEqual(len(guard.signatures), 0)
+        self.assertEqual(guard.current_depth, 0)
+
+    def test_wrapper_stops_provider_after_observed_request_depth_trip(self):
+        class Completions:
+            calls = 0
+            def create(self, *args, **kwargs):
+                name = ("first", "second", "third")[self.calls]
+                self.calls += 1
+                function = type("Function", (), {"name": name, "arguments": "{}"})()
+                tool_call = type("ToolCall", (), {"function": function})()
+                message = type("Message", (), {"tool_calls": [tool_call]})()
+                return type("Response", (), {"choices": [type("Choice", (), {"message": message})()], "usage": None})()
+
+        completions = Completions()
+        client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
+        guard = CircuitBreaker(policy=TripPolicy(max_depth=2, fallback_mode="synthetic_response"))
+        wrapped = wrap_openai(client, guard)
+
+        wrapped.chat.completions.create(model="gpt-4o")
+        wrapped.chat.completions.create(model="gpt-4o")
+        self.assertTrue(wrapped.chat.completions.create(model="gpt-4o")["loopguard_status"]["tripped"])
+        self.assertTrue(wrapped.chat.completions.create(model="gpt-4o")["loopguard_status"]["tripped"])
+
+        self.assertEqual(completions.calls, 3)
+        self.assertEqual(len(guard.observed_signatures), 3)
+
+    def test_observed_request_and_actual_execution_have_separate_histories(self):
+        guard = CircuitBreaker(policy=TripPolicy(max_consecutive_retries=2, fallback_mode="exception"))
+
+        self.assertIsNone(guard.observe_tool_request("lookup", '{"id": 1}'))
+        self.assertIsNone(guard.before_tool_call("lookup", {"id": 1}))
+        guard.after_tool_call("lookup", {"id": 1}, result="ok")
+
+        self.assertEqual(len(guard.observed_signatures), 1)
+        self.assertEqual(len(guard.signatures), 1)
+        self.assertEqual(guard.state, CircuitState.CLOSED)
+
+    def test_anthropic_wrapper_blocks_alternating_observed_requests(self):
+        class Messages:
+            calls = 0
+            def create(self, *args, **kwargs):
+                name, payload = [("a", {"x": 1}), ("b", {"y": 2}), ("a", {"x": 1}), ("b", {"y": 2})][self.calls]
+                self.calls += 1
+                block = type("Block", (), {"type": "tool_use", "name": name, "input": payload})()
+                return type("Response", (), {"content": [block], "usage": None})()
+
+        messages = Messages()
+        client = type("Client", (), {"messages": messages})()
+        guard = CircuitBreaker(policy=TripPolicy(max_consecutive_retries=5, max_cycle_length=2, fallback_mode="synthetic_response"))
+        wrapped = wrap_anthropic(client, guard)
+
+        for _ in range(3):
+            self.assertFalse(isinstance(wrapped.messages.create(model="claude-3-5-sonnet"), dict))
+        blocked = wrapped.messages.create(model="claude-3-5-sonnet")
+
+        self.assertTrue(blocked["loopguard_status"]["tripped"])
+        self.assertEqual(messages.calls, 4)
+        self.assertEqual(len(guard.history), 0)
+
+    def test_wrapper_rejects_tripped_guard_without_provider_call(self):
+        class Completions:
+            calls = 0
+            def create(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError("provider must not be called")
+
+        completions = Completions()
+        client = type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
+        guard = CircuitBreaker(policy=TripPolicy(max_cost_usd=0.01, fallback_mode="synthetic_response"))
+        guard.record_usage(prompt_tokens=10_000, completion_tokens=0, model="gpt-4o")
+
+        blocked = wrap_openai(client, guard).chat.completions.create(model="gpt-4o")
+
+        self.assertTrue(blocked["loopguard_status"]["tripped"])
+        self.assertEqual(completions.calls, 0)
+
+    def test_openai_wrapper_rejects_streaming_and_async_clients_before_provider_call(self):
+        class StreamingCompletions:
+            calls = 0
+            def create(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError("provider must not be called")
+
+        streaming = StreamingCompletions()
+        stream_client = type("Client", (), {"chat": type("Chat", (), {"completions": streaming})()})()
+        with self.assertRaisesRegex(ValueError, "streaming"):
+            wrap_openai(stream_client, CircuitBreaker()).chat.completions.create(model="gpt-4o", stream=True)
+        self.assertEqual(streaming.calls, 0)
+
+        class AsyncCompletions:
+            calls = 0
+            async def create(self, *args, **kwargs):
+                self.calls += 1
+
+        asynchronous = AsyncCompletions()
+        async_client = type("Client", (), {"chat": type("Chat", (), {"completions": asynchronous})()})()
+        with self.assertRaisesRegex(TypeError, "asynchronous"):
+            wrap_openai(async_client, CircuitBreaker()).chat.completions.create(model="gpt-4o")
+        self.assertEqual(asynchronous.calls, 0)
+
+    def test_anthropic_wrapper_rejects_streaming_and_async_clients_before_provider_call(self):
+        class StreamingMessages:
+            calls = 0
+            def create(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError("provider must not be called")
+
+        streaming = StreamingMessages()
+        stream_client = type("Client", (), {"messages": streaming})()
+        with self.assertRaisesRegex(ValueError, "streaming"):
+            wrap_anthropic(stream_client, CircuitBreaker()).messages.create(model="claude", stream=True)
+        self.assertEqual(streaming.calls, 0)
+
+        class AsyncMessages:
+            calls = 0
+            async def create(self, *args, **kwargs):
+                self.calls += 1
+
+        asynchronous = AsyncMessages()
+        async_client = type("Client", (), {"messages": asynchronous})()
+        with self.assertRaisesRegex(TypeError, "asynchronous"):
+            wrap_anthropic(async_client, CircuitBreaker()).messages.create(model="claude")
+        self.assertEqual(asynchronous.calls, 0)
 
 
 if __name__ == "__main__":

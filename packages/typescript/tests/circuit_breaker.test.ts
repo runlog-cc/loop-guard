@@ -7,6 +7,7 @@ import {
   BudgetExceededError,
   MaxDepthExceededError,
   wrapOpenAI,
+  wrapAnthropic,
 } from "../src/index";
 
 describe("Loop-Guard TypeScript SDK", () => {
@@ -163,11 +164,112 @@ describe("Loop-Guard TypeScript SDK", () => {
     // Call 1: passes
     const res1 = await wrapped.chat.completions.create({ model: "gpt-4o" });
     expect(res1.choices).toBeDefined();
+    guard.beforeToolCall("fetch_data", '{"id": 42}');
     guard.afterToolCall({ toolName: "fetch_data", args: '{"id": 42}' });
 
     // Call 2: repeated tool call -> returns synthetic fallback
     const res2 = await wrapped.chat.completions.create({ model: "gpt-4o" });
     expect(res2.loopguardStatus).toBeDefined();
     expect(res2.loopguardStatus.tripped).toBe(true);
+  });
+
+  test("wrapOpenAI records canonical observed requests without tool results", async () => {
+    let calls = 0;
+    const guard = new CircuitBreaker({ policy: { maxConsecutiveRetries: 3, fallbackMode: "synthetic_response" } });
+    const wrapped = wrapOpenAI({ chat: { completions: { create: async () => {
+      calls++;
+      return { choices: [{ message: { tool_calls: [{ function: { name: "lookup", arguments: calls === 2 ? '{"a":1,"b":2}' : '{"b":2,"a":1}' } }] } }] };
+    } } } }, guard);
+
+    await wrapped.chat.completions.create({ model: "gpt-4o" });
+    await wrapped.chat.completions.create({ model: "gpt-4o" });
+    const blocked = await wrapped.chat.completions.create({ model: "gpt-4o" });
+
+    expect(blocked.loopguardStatus.tripped).toBe(true);
+    expect(calls).toBe(3);
+    expect(guard.history).toHaveLength(0);
+    expect(guard.signatures).toHaveLength(0);
+    expect(guard.observedSignatures).toHaveLength(3);
+  });
+
+  test("observed request depth limit blocks distinct requests", () => {
+    const guard = new CircuitBreaker({ policy: { maxDepth: 2, fallbackMode: "synthetic_response" } });
+    expect(guard.observeToolRequest("first", {})).toBeNull();
+    expect(guard.observeToolRequest("second", {})).toBeNull();
+    const blocked = guard.observeToolRequest("third", {});
+
+    expect(blocked.loopguardStatus.tripped).toBe(true);
+    expect(guard.tripReason).toBe("max_depth_exceeded");
+    expect(guard.observedSignatures).toHaveLength(3);
+    expect(guard.signatures).toHaveLength(0);
+    expect(guard.currentDepth).toBe(0);
+  });
+
+  test("wrapper stops provider after observed request depth trip", async () => {
+    let calls = 0;
+    const names = ["first", "second", "third"];
+    const guard = new CircuitBreaker({ policy: { maxDepth: 2, fallbackMode: "synthetic_response" } });
+    const wrapped = wrapOpenAI({ chat: { completions: { create: async () => {
+      const name = names[calls++];
+      return { choices: [{ message: { tool_calls: [{ function: { name, arguments: "{}" } }] } }] };
+    } } } }, guard);
+
+    await wrapped.chat.completions.create({ model: "gpt-4o" });
+    await wrapped.chat.completions.create({ model: "gpt-4o" });
+    expect((await wrapped.chat.completions.create({ model: "gpt-4o" })).loopguardStatus.tripped).toBe(true);
+    expect((await wrapped.chat.completions.create({ model: "gpt-4o" })).loopguardStatus.tripped).toBe(true);
+
+    expect(calls).toBe(3);
+    expect(guard.observedSignatures).toHaveLength(3);
+  });
+
+  test("observed requests and actual execution use separate histories", () => {
+    const guard = new CircuitBreaker({ policy: { maxConsecutiveRetries: 2 } });
+    expect(guard.observeToolRequest("lookup", '{"id":1}')).toBeNull();
+    expect(guard.beforeToolCall("lookup", { id: 1 })).toBeNull();
+    guard.afterToolCall({ toolName: "lookup", args: { id: 1 }, result: "ok" });
+
+    expect(guard.observedSignatures).toHaveLength(1);
+    expect(guard.signatures).toHaveLength(1);
+    expect(guard.state).toBe("closed");
+  });
+
+  test("wrapAnthropic blocks an alternating observed cycle", async () => {
+    let calls = 0;
+    const steps = [["a", { x: 1 }], ["b", { y: 2 }], ["a", { x: 1 }], ["b", { y: 2 }]] as const;
+    const guard = new CircuitBreaker({ policy: { maxConsecutiveRetries: 5, maxCycleLength: 2, fallbackMode: "synthetic_response" } });
+    const wrapped = wrapAnthropic({ messages: { create: async () => {
+      const [name, input] = steps[calls++];
+      return { content: [{ type: "tool_use", name, input }] };
+    } } }, guard);
+
+    await wrapped.messages.create({ model: "claude-3-5-sonnet" });
+    await wrapped.messages.create({ model: "claude-3-5-sonnet" });
+    await wrapped.messages.create({ model: "claude-3-5-sonnet" });
+    const blocked = await wrapped.messages.create({ model: "claude-3-5-sonnet" });
+
+    expect(blocked.loopguardStatus.tripped).toBe(true);
+    expect(calls).toBe(4);
+    expect(guard.history).toHaveLength(0);
+  });
+
+  test("wrappers do not call a provider after the guard trips", async () => {
+    let calls = 0;
+    const guard = new CircuitBreaker({ policy: { maxCostUsd: 0.01, fallbackMode: "synthetic_response" } });
+    guard.recordUsage({ promptTokens: 10_000, completionTokens: 0, model: "gpt-4o" });
+    const wrapped = wrapOpenAI({ chat: { completions: { create: async () => { calls++; throw new Error("must not call provider"); } } } }, guard);
+
+    const blocked = await wrapped.chat.completions.create({ model: "gpt-4o" });
+
+    expect(blocked.loopguardStatus.tripped).toBe(true);
+    expect(calls).toBe(0);
+  });
+
+  test("wrappers reject streaming requests before calling the provider", async () => {
+    let calls = 0;
+    const wrapped = wrapOpenAI({ chat: { completions: { create: async () => { calls++; throw new Error("must not call provider"); } } } }, new CircuitBreaker());
+
+    await expect(wrapped.chat.completions.create({ model: "gpt-4o", stream: true })).rejects.toThrow("streaming");
+    expect(calls).toBe(0);
   });
 });

@@ -20,15 +20,19 @@ export const MODEL_CATALOG: Record<string, ModelPricing> = {
   _default: { promptPer1M: 2.50, completionPer1M: 10.00 },
 };
 
+MODEL_CATALOG["gpt-4o-mini-2024-07-18"] = MODEL_CATALOG["gpt-4o-mini"];
+MODEL_CATALOG["o1-mini-2024-09-12"] = MODEL_CATALOG["o1-mini"];
+MODEL_CATALOG["gpt-4o-2024-08-06"] = MODEL_CATALOG["gpt-4o"];
+MODEL_CATALOG["claude-3-5-sonnet-20241022"] = MODEL_CATALOG["claude-3-5-sonnet"];
+export function validateNumber(value: number, integer = false): void {
+  if (!Number.isFinite(value) || value < 0 || (integer && !Number.isSafeInteger(value))) throw new Error("Usage and prices must be finite nonnegative numbers; tokens must be integers");
+}
 export function getPricingForModel(modelName?: string): ModelPricing {
-  if (!modelName) return MODEL_CATALOG._default;
+  if (!modelName) throw new Error("Unknown model: provide exact catalog pricing or explicitCost");
   const lower = modelName.toLowerCase();
   if (MODEL_CATALOG[lower]) return MODEL_CATALOG[lower];
 
-  for (const [key, pricing] of Object.entries(MODEL_CATALOG)) {
-    if (lower.includes(key)) return pricing;
-  }
-  return MODEL_CATALOG._default;
+  throw new Error("Unknown model: provide exact catalog pricing or explicitCost");
 }
 
 export class BudgetTracker {
@@ -39,6 +43,7 @@ export class BudgetTracker {
   totalTokens: number = 0;
 
   constructor(maxCostUsd: number = 2.00) {
+    validateNumber(maxCostUsd);
     this.maxCostUsd = maxCostUsd;
   }
 
@@ -49,11 +54,15 @@ export class BudgetTracker {
     cachedTokens?: number;
     explicitCost?: number;
   }): { totalCostUsd: number; isExceeded: boolean } {
+    for (const value of [params.promptTokens, params.completionTokens, params.cachedTokens ?? 0]) validateNumber(value, true);
+    if ((params.cachedTokens ?? 0) > params.promptTokens) throw new Error("Cached tokens exceed prompt tokens");
     let cost = 0;
     if (params.explicitCost !== undefined) {
+      validateNumber(params.explicitCost);
       cost = params.explicitCost;
     } else {
       const pricing = getPricingForModel(params.model);
+      for (const value of [pricing.promptPer1M, pricing.completionPer1M, pricing.cachedPromptPer1M ?? 0]) validateNumber(value);
       if (pricing.cachedPromptPer1M !== undefined && (params.cachedTokens || 0) > 0) {
         const regular = Math.max(0, params.promptTokens - (params.cachedTokens || 0));
         cost += (regular / 1_000_000) * pricing.promptPer1M;
@@ -64,6 +73,7 @@ export class BudgetTracker {
       cost += (params.completionTokens / 1_000_000) * pricing.completionPer1M;
     }
 
+    validateNumber(this.totalCostUsd + cost);
     this.totalCostUsd += cost;
     this.totalPromptTokens += params.promptTokens;
     this.totalCompletionTokens += params.completionTokens;

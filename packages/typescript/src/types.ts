@@ -53,7 +53,9 @@ export interface SessionTelemetry {
     totalCompletionTokens: number;
   };
   historyCount: number;
+  observedRequestCount?: number;
   recentSignatures: string[];
+  recentObservedSignatures?: string[];
   elapsedSeconds: number;
   history: Array<{
     id: string;

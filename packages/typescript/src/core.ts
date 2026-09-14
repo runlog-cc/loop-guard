@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { BudgetTracker } from "./budget";
+import { BudgetTracker, validateNumber } from "./budget";
 import {
   CircuitState,
   ToolCallEvent,
@@ -151,9 +151,19 @@ export class CircuitBreaker {
   tripDetails?: Record<string, any>;
   history: ToolCallEvent[] = [];
   signatures: string[] = [];
+  observedSignatures: string[] = [];
   budget: BudgetTracker;
   currentDepth: number = 0;
   private pendingSignature?: string;
+  private requestInFlight = false;
+  beginRequest(): void {
+    if (this.requestInFlight) throw new Error("Overlapping model requests are unsupported per guard");
+    this.requestInFlight = true;
+  }
+  endRequest(): void { this.requestInFlight = false; }
+  haltOnAccountingFailure(): void {
+    if (this.state !== "tripped") this.trip("manual_halt", {error: "Response accounting or observation failed"});
+  }
   startTime: number = Date.now();
   onTripCallback?: (cb: CircuitBreaker, details: Record<string, any>) => void;
   onEventCallback?: (telemetry: SessionTelemetry) => void;
@@ -208,19 +218,78 @@ export class CircuitBreaker {
     return totalCostUsd;
   }
 
-  beforeToolCall(toolName: string, args: any = {}): any {
-    this.currentDepth++;
-    const signature = SignatureHasher.compute(toolName, args);
-    this.pendingSignature = signature;
-
+  ensureActive(): any {
+    if (this.budget.isExceeded() && this.state !== "tripped") this.trip("budget_exceeded", {});
     if (this.state === "tripped") {
       return this.handleTripped(
         this.tripReason || "manual_halt",
-        toolName,
-        signature,
+        "model_request",
+        "",
         this.tripDetails || {}
       );
     }
+    return null;
+  }
+
+  observeToolRequest(toolName: string, args: any = {}): any {
+    const blocked = this.ensureActive();
+    if (blocked !== null && blocked !== undefined) return blocked;
+
+    const signature = SignatureHasher.compute(toolName, args);
+    this.observedSignatures.push(signature);
+    const observedRequestCount = this.observedSignatures.length;
+    if (observedRequestCount > this.policy.maxDepth) {
+      this.trip("max_depth_exceeded", {
+        maxObservedToolRequests: this.policy.maxDepth,
+        observedRequestCount,
+        observation: "model_requested_tool",
+      }, toolName, signature);
+      return this.handleTripped(
+        "max_depth_exceeded", toolName, signature, this.tripDetails || {}
+      );
+    }
+    const simulated = this.observedSignatures;
+    let consecutiveCount = 0;
+    for (let i = simulated.length - 1; i >= 0; i--) {
+      if (simulated[i] === signature) consecutiveCount++;
+      else break;
+    }
+    if (consecutiveCount >= this.policy.maxConsecutiveRetries) {
+      this.trip("consecutive_retry", {
+        consecutiveCount,
+        threshold: this.policy.maxConsecutiveRetries,
+        signature,
+        observation: "model_requested_tool",
+      }, toolName, signature);
+      return this.handleTripped(
+        "consecutive_retry", toolName, signature, this.tripDetails || {}, consecutiveCount
+      );
+    }
+    if (this.policy.detectCycles) {
+      const cycle = CycleDetector.detectCycle(
+        simulated, this.policy.maxCycleLength, this.policy.minCycleRepetitions
+      );
+      if (cycle) {
+        this.trip("cycle_detected", {
+          cyclePattern: cycle.pattern,
+          repetitions: cycle.repetitions,
+          signatures: simulated.slice(-8),
+          observation: "model_requested_tool",
+        }, toolName, signature);
+        return this.handleTripped(
+          "cycle_detected", toolName, signature, this.tripDetails || {}, cycle.repetitions
+        );
+      }
+    }
+    return null;
+  }
+
+  beforeToolCall(toolName: string, args: any = {}): any {
+    if (this.pendingSignature) throw new Error("Overlapping tool calls are unsupported");
+    const blocked = this.ensureActive();
+    if (this.state === "tripped") return blocked;
+    this.currentDepth++;
+    const signature = SignatureHasher.compute(toolName, args);
 
     if (this.currentDepth > this.policy.maxDepth) {
       this.trip("max_depth_exceeded", {
@@ -282,6 +351,7 @@ export class CircuitBreaker {
       }
     }
 
+    this.pendingSignature = signature;
     return null;
   }
 
@@ -292,6 +362,8 @@ export class CircuitBreaker {
     isError?: boolean;
     costUsd?: number;
   }): ToolCallEvent {
+    validateNumber(params.costUsd ?? 0);
+    if (!this.pendingSignature || !this.pendingSignature.startsWith(params.toolName + ":")) throw new Error("Completion requires matching admitted tool call");
     let signature: string;
     if (params.args !== undefined) {
       signature = SignatureHasher.compute(params.toolName, params.args);
@@ -302,6 +374,9 @@ export class CircuitBreaker {
       signature = SignatureHasher.compute(params.toolName, null);
     }
 
+    if (this.pendingSignature && signature !== this.pendingSignature) throw new Error("Completion arguments do not match pending tool call");
+    this.pendingSignature = undefined;
+    this.recordUsage({promptTokens: 0, completionTokens: 0, costUsd: params.costUsd ?? 0});
     this.signatures.push(signature);
 
     const event: ToolCallEvent = {
@@ -427,6 +502,18 @@ export class CircuitBreaker {
     });
   }
 
+  reset(): void {
+    if (this.budget.isExceeded()) throw new Error("Cannot reset exhausted budget; create a new session");
+    if (this.pendingSignature || this.requestInFlight) throw new Error("Cannot reset in flight");
+    this.state = "closed";
+    this.tripReason = undefined;
+    this.tripDetails = undefined;
+    this.signatures = [];
+    this.observedSignatures = [];
+    this.history = [];
+    this.currentDepth = 0;
+  }
+
   toTelemetry(): SessionTelemetry {
     return {
       sessionId: this.sessionId,
@@ -437,7 +524,9 @@ export class CircuitBreaker {
       maxDepth: this.policy.maxDepth,
       budget: this.budget.getSummary(),
       historyCount: this.history.length,
+      observedRequestCount: this.observedSignatures.length,
       recentSignatures: this.signatures.slice(-10),
+      recentObservedSignatures: this.observedSignatures.slice(-10),
       elapsedSeconds: Number(((Date.now() - this.startTime) / 1000).toFixed(2)),
       history: this.history.slice(-15).map((h) => ({
         id: h.id,

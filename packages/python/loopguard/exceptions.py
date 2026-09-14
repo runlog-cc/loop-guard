@@ -54,7 +54,7 @@ class RepetitiveToolCallError(CircuitTrippedError):
 
 
 class BudgetExceededError(CircuitTrippedError):
-    """Raised when the session cost exceeds the hard per-session dollar ceiling."""
+    """Raised when observed session cost exceeds the configured threshold."""
     pass
 
 

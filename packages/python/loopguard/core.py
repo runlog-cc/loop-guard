@@ -1,6 +1,7 @@
 """Core circuit-breaker engine, signature hashing, cycle detection, and session state machine."""
 
 import hashlib
+import threading
 import json
 import time
 import uuid
@@ -151,8 +152,11 @@ class CircuitBreaker:
         self.trip_details: Optional[Dict[str, Any]] = None
         self.history: List[ToolCallEvent] = []
         self.signatures: List[str] = []
+        self.observed_signatures: List[str] = []
         self.budget: BudgetTracker = BudgetTracker(max_cost_usd=self.policy.max_cost_usd)
         self.current_depth: int = 0
+        self._request_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._pending_signature: Optional[str] = None
         self.on_trip_callback = on_trip
         self.on_event_callback = on_event
@@ -187,6 +191,110 @@ class CircuitBreaker:
 
         return total_cost
 
+    def ensure_active(self) -> Optional[Any]:
+        """Block a new model request when this session has already tripped.
+
+        This deliberately does not create a tool event or change depth: no tool
+        execution has happened at this point.
+        """
+        if self.budget.is_exceeded() and self.state != CircuitState.TRIPPED:
+            self._trip(TripReason.BUDGET_EXCEEDED, {})
+        if self.state == CircuitState.TRIPPED:
+            return self._handle_tripped(
+                reason=self.trip_reason or TripReason.MANUAL_HALT,
+                tool_name="model_request",
+                signature="",
+                details=self.trip_details or {},
+            )
+        return None
+
+    def observe_tool_request(
+        self,
+        tool_name: str,
+        arguments: Union[Dict[str, Any], str, None] = None,
+    ) -> Optional[Any]:
+        """Record a model-requested tool without claiming it executed.
+
+        Adapters call this after receiving a provider response.  Applications
+        still use before_tool_call/after_tool_call around real tool execution.
+        """
+        blocked = self.ensure_active()
+        if blocked is not None:
+            return blocked
+        signature = SignatureHasher.compute(tool_name, arguments)
+        self.observed_signatures.append(signature)
+        observed_request_count = len(self.observed_signatures)
+        if observed_request_count > self.policy.max_depth:
+            self._trip(
+                reason=TripReason.MAX_DEPTH_EXCEEDED,
+                details={
+                    "max_observed_tool_requests": self.policy.max_depth,
+                    "observed_request_count": observed_request_count,
+                    "observation": "model_requested_tool",
+                },
+                tool_name=tool_name,
+                signature=signature,
+            )
+            return self._handle_tripped(
+                reason=TripReason.MAX_DEPTH_EXCEEDED,
+                tool_name=tool_name,
+                signature=signature,
+                details=self.trip_details or {},
+            )
+        simulated_signatures = self.observed_signatures
+        consecutive_count = 0
+        for sig in reversed(simulated_signatures):
+            if sig == signature:
+                consecutive_count += 1
+            else:
+                break
+        if consecutive_count >= self.policy.max_consecutive_retries:
+            self._trip(
+                reason=TripReason.CONSECUTIVE_RETRY,
+                details={
+                    "consecutive_count": consecutive_count,
+                    "threshold": self.policy.max_consecutive_retries,
+                    "signature": signature,
+                    "observation": "model_requested_tool",
+                },
+                tool_name=tool_name,
+                signature=signature,
+            )
+            return self._handle_tripped(
+                reason=TripReason.CONSECUTIVE_RETRY,
+                tool_name=tool_name,
+                signature=signature,
+                details=self.trip_details or {},
+                repetition_count=consecutive_count,
+            )
+        if self.policy.detect_cycles:
+            cycle = CycleDetector.detect_cycle(
+                simulated_signatures,
+                max_period=self.policy.max_cycle_length,
+                min_reps=self.policy.min_cycle_repetitions,
+            )
+            if cycle is not None:
+                pattern, reps = cycle
+                self._trip(
+                    reason=TripReason.CYCLE_DETECTED,
+                    details={
+                        "cycle_pattern": pattern,
+                        "repetitions": reps,
+                        "signatures": simulated_signatures[-8:],
+                        "observation": "model_requested_tool",
+                    },
+                    tool_name=tool_name,
+                    signature=signature,
+                )
+                return self._handle_tripped(
+                    reason=TripReason.CYCLE_DETECTED,
+                    tool_name=tool_name,
+                    signature=signature,
+                    details=self.trip_details or {},
+                    repetition_count=reps,
+                )
+        return None
+
     def before_tool_call(
         self,
         tool_name: str,
@@ -197,9 +305,12 @@ class CircuitBreaker:
         If circuit is already tripped or this call triggers a trip,
         either raises an exception or returns a fallback response according to policy.
         """
+        if self._pending_signature is not None:
+            raise RuntimeError("Overlapping tool calls are unsupported; complete the pending call first")
+        blocked = self.ensure_active()
+        if self.state == CircuitState.TRIPPED: return blocked
         self.current_depth += 1
         signature = SignatureHasher.compute(tool_name, arguments)
-        self._pending_signature = signature
 
         # Check if already tripped
         if self.state == CircuitState.TRIPPED:
@@ -281,6 +392,7 @@ class CircuitBreaker:
                 )
 
         # Approved to proceed
+        self._pending_signature = signature
         return None
 
     def after_tool_call(
@@ -291,6 +403,12 @@ class CircuitBreaker:
         is_error: bool = False,
         cost_usd: float = 0.0,
     ) -> ToolCallEvent:
+        from loopguard.budget import validate_number
+        validate_number(cost_usd, "cost_usd")
+        if self._pending_signature is None:
+            raise RuntimeError("after_tool_call requires an admitted before_tool_call")
+        if not self._pending_signature.startswith(tool_name + ":"):
+            raise RuntimeError("Tool completion does not match pending call")
         if arguments is not None:
             signature = SignatureHasher.compute(tool_name, arguments)
         elif self._pending_signature is not None:
@@ -298,6 +416,10 @@ class CircuitBreaker:
             self._pending_signature = None
         else:
             signature = SignatureHasher.compute(tool_name, None)
+        if signature != self._pending_signature and self._pending_signature is not None:
+            raise RuntimeError("Tool arguments do not match pending call")
+        self._pending_signature = None
+        self.record_usage(0, 0, cost_usd=cost_usd)
         self.signatures.append(signature)
 
         preview = str(result)[:200] if result is not None else None
@@ -422,10 +544,15 @@ class CircuitBreaker:
 
     def reset(self):
         """Reset breaker to CLOSED state."""
+        if self.budget.is_exceeded():
+            raise RuntimeError("Cannot reset an exhausted budget; create a new session")
+        if self._pending_signature is not None or self._request_lock.locked():
+            raise RuntimeError("Cannot reset while a call is in flight")
         self.state = CircuitState.CLOSED
         self.trip_reason = None
         self.trip_details = None
         self.signatures.clear()
+        self.observed_signatures.clear()
         self.history.clear()
         self.current_depth = 0
 
@@ -440,7 +567,9 @@ class CircuitBreaker:
             "max_depth": self.policy.max_depth,
             "budget": self.budget.get_summary(),
             "history_count": len(self.history),
+            "observed_request_count": len(self.observed_signatures),
             "recent_signatures": self.signatures[-10:],
+            "recent_observed_signatures": self.observed_signatures[-10:],
             "elapsed_seconds": round(time.time() - self.start_time, 2),
             "history": [
                 {
@@ -456,3 +585,13 @@ class CircuitBreaker:
                 for h in self.history[-15:]
             ],
         }
+
+
+def _serialized(method):
+    def wrapped(self, *args, **kwargs):
+        with self._lifecycle_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+for _method in ("before_tool_call", "after_tool_call", "reset", "record_usage"):
+    setattr(CircuitBreaker, _method, _serialized(getattr(CircuitBreaker, _method)))

@@ -75,7 +75,7 @@ def run_simulated_broken_agent():
             print(f"🛑 [CIRCUIT OPEN] Tool call blocked by Loop-Guard!")
             print(f"   Fallback response delivered to agent:")
             print(f"   --> '{fallback.get('content')}'")
-            print(f"   Total spent: ${guard.budget.total_cost_usd:.4f} (Saved ~$50.00+ in runaway infinite loops!)")
+            print(f"   Observed spend: ${guard.budget.total_cost_usd:.4f} (upstream savings are not measured)")
             break
 
         # Simulate tool execution failure
