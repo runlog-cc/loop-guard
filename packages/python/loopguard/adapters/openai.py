@@ -42,6 +42,8 @@ def wrap_openai(client: Any, guard: CircuitBreaker) -> Any:
                 get_pricing_for_model(model)
                 # Execute API call
                 get_pricing_for_model(model)
+                blocked = guard.admit_provider_attempt()
+                if guard.state.value == "tripped": return blocked
                 response = orig_create(*args, **kwargs)
                 response_received = True
                 if inspect.isawaitable(response):
@@ -52,15 +54,18 @@ def wrap_openai(client: Any, guard: CircuitBreaker) -> Any:
                 usage = getattr(response, "usage", None)
                 if usage:
                     guard.record_usage(
-                        prompt_tokens=getattr(usage, "prompt_tokens", 0),
-                        completion_tokens=getattr(usage, "completion_tokens", 0),
+                        prompt_tokens=getattr(usage, "prompt_tokens", None),
+                        completion_tokens=getattr(usage, "completion_tokens", None),
                         model=model,
                         cached_tokens=getattr(
                             getattr(usage, "prompt_tokens_details", None),
                             "cached_tokens",
                             0,
-                        ) if hasattr(usage, "prompt_tokens_details") else 0,
+                        ) or 0,
                     )
+
+                if usage: guard.accounted_provider_attempts += 1
+                if guard.state.value == "tripped": return guard.ensure_active()
 
                 # Inspect tool calls in response choices
                 choices = getattr(response, "choices", [])
@@ -78,7 +83,7 @@ def wrap_openai(client: Any, guard: CircuitBreaker) -> Any:
                             # This is only an observed provider request.  The caller
                             # owns the actual before/after tool execution lifecycle.
                             fallback = guard.observe_tool_request(tool_name=name, arguments=call_args)
-                            if fallback is not None:
+                            if guard.state.value == "tripped":
                                 return fallback
 
                 return response

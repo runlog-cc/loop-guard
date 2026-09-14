@@ -1,5 +1,5 @@
 import { CircuitBreaker } from "../core";
-import { getPricingForModel } from "../budget";
+import { getPricingForModel, validateNumber } from "../budget";
 
 export function wrapAnthropic<T extends Record<string, any>>(client: T, guard: CircuitBreaker): T {
   if (client.messages && typeof client.messages.create === "function") {
@@ -18,26 +18,32 @@ export function wrapAnthropic<T extends Record<string, any>>(client: T, guard: C
       const model = params.model || "claude-3-5-sonnet";
 
       getPricingForModel(model);
+      const admission = guard.admitProviderAttempt();
+      if ((guard.state as string) === "tripped") return admission;
       const response = await originalCreate(...args);
       responseReceived = true;
 
       if (response?.usage?.cache_creation_input_tokens) throw new Error("Cache creation billing unsupported; use explicit normalized usage");
       if (response && response.usage) {
+        // Validate before addition: JavaScript otherwise coerces null/boolean to numbers.
+        validateNumber(response.usage.input_tokens, true);
         guard.recordUsage({
-          promptTokens: (response.usage.input_tokens ?? 0) + (response.usage.cache_read_input_tokens ?? 0),
-          completionTokens: response.usage.output_tokens ?? 0,
+          promptTokens: (response.usage.input_tokens) + (response.usage.cache_read_input_tokens ?? 0),
+          completionTokens: response.usage.output_tokens,
           model,
           cachedTokens: response.usage.cache_read_input_tokens ?? 0,
         });
       }
 
+      if (response?.usage) guard.accountedProviderAttempts++;
+      if ((guard.state as string) === "tripped") return guard.ensureActive();
       if (response && response.content) {
         for (const block of response.content) {
           if (block.type === "tool_use") {
             const toolName = block.name || "unknown";
             const toolInput = block.input || {};
             const fallback = guard.observeToolRequest(toolName, toolInput);
-            if (fallback !== null && fallback !== undefined) {
+            if ((guard.state as string) === "tripped") {
               return fallback;
             }
           }

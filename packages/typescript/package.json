@@ -1,13 +1,15 @@
 {
   "name": "@runlog/loopguard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Real-time AI agent circuit breaker and loop prevention SDK.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
-    "test": "bun test"
+    "test": "bun test",
+    "test:node": "npm run build && node --test tests/*.cjs",
+    "test:sdk": "npm run build && node --test tests/sdk-integration.cjs"
   },
   "keywords": [
     "ai",
@@ -30,7 +32,9 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "typescript": "5.8.3",
-    "@types/node": "22.15.3"
+    "@anthropic-ai/sdk": "0.54.0",
+    "@types/node": "22.15.3",
+    "openai": "4.104.0",
+    "typescript": "5.8.3"
   }
 }

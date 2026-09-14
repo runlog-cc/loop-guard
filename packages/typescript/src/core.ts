@@ -154,6 +154,8 @@ export class CircuitBreaker {
   observedSignatures: string[] = [];
   budget: BudgetTracker;
   currentDepth: number = 0;
+  providerAttempts: number = 0;
+  accountedProviderAttempts: number = 0;
   private pendingSignature?: string;
   private requestInFlight = false;
   beginRequest(): void {
@@ -177,6 +179,8 @@ export class CircuitBreaker {
     this.sessionId = options?.sessionId || `sess_${Math.random().toString(36).slice(2, 14)}`;
     this.policy = {
       maxConsecutiveRetries: options?.policy?.maxConsecutiveRetries ?? 3,
+      maxProviderAttempts: options?.policy?.maxProviderAttempts ?? 100,
+      loopExemptTools: options?.policy?.loopExemptTools ?? [],
       maxDepth: options?.policy?.maxDepth ?? 20,
       maxCostUsd: options?.policy?.maxCostUsd ?? 2.0,
       detectCycles: options?.policy?.detectCycles ?? true,
@@ -188,6 +192,8 @@ export class CircuitBreaker {
         "Loop-Guard Circuit Breaker Tripped: Safe execution halted.",
       customFallbackHandler: options?.policy?.customFallbackHandler ?? (() => null),
     };
+    if (!Number.isSafeInteger(this.policy.maxProviderAttempts) || this.policy.maxProviderAttempts < 1) throw new Error("maxProviderAttempts must be a positive finite integer");
+    if (!Array.isArray(this.policy.loopExemptTools) || !this.policy.loopExemptTools.every(n => typeof n === "string")) throw new Error("loopExemptTools must be an array of tool names");
     this.budget = new BudgetTracker(this.policy.maxCostUsd);
     this.onTripCallback = options?.onTrip;
     this.onEventCallback = options?.onEvent;
@@ -231,9 +237,20 @@ export class CircuitBreaker {
     return null;
   }
 
+  admitProviderAttempt(): any {
+    const blocked = this.ensureActive();
+    if (this.state === "tripped") return blocked;
+    if (this.providerAttempts >= this.policy.maxProviderAttempts) {
+      this.trip("max_provider_attempts_exceeded", { providerAttempts: this.providerAttempts, maxProviderAttempts: this.policy.maxProviderAttempts });
+      return this.ensureActive();
+    }
+    this.providerAttempts++;
+    return null;
+  }
+
   observeToolRequest(toolName: string, args: any = {}): any {
     const blocked = this.ensureActive();
-    if (blocked !== null && blocked !== undefined) return blocked;
+    if (this.state === "tripped") return blocked;
 
     const signature = SignatureHasher.compute(toolName, args);
     this.observedSignatures.push(signature);
@@ -248,7 +265,8 @@ export class CircuitBreaker {
         "max_depth_exceeded", toolName, signature, this.tripDetails || {}
       );
     }
-    const simulated = this.observedSignatures;
+    if (this.policy.loopExemptTools.includes(toolName)) return null;
+    const simulated = this.observedSignatures.filter(s => !this.policy.loopExemptTools.some(n => s.startsWith(n + ":")));
     let consecutiveCount = 0;
     for (let i = simulated.length - 1; i >= 0; i--) {
       if (simulated[i] === signature) consecutiveCount++;
@@ -304,7 +322,8 @@ export class CircuitBreaker {
       );
     }
 
-    const simulated = [...this.signatures, signature];
+    if (this.policy.loopExemptTools.includes(toolName)) { this.pendingSignature = signature; return null; }
+    const simulated = [...this.signatures, signature].filter(s => !this.policy.loopExemptTools.some(n => s.startsWith(n + ":")));
     let consecutiveCount = 0;
     for (let i = simulated.length - 1; i >= 0; i--) {
       if (simulated[i] === signature) {
@@ -522,6 +541,9 @@ export class CircuitBreaker {
       tripDetails: this.tripDetails,
       currentDepth: this.currentDepth,
       maxDepth: this.policy.maxDepth,
+      providerAttempts: this.providerAttempts,
+      unaccountedProviderAttempts: this.providerAttempts - this.accountedProviderAttempts,
+      maxProviderAttempts: this.policy.maxProviderAttempts,
       budget: this.budget.getSummary(),
       historyCount: this.history.length,
       observedRequestCount: this.observedSignatures.length,

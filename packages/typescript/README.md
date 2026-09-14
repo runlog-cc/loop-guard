@@ -1,4 +1,4 @@
-# Loop-Guard 0.2.0
+# Loop-Guard 0.3.0
 
 A sequential session circuit breaker for repeated tool requests, cycles, attempted-call limits, and **post-response** usage budgets. Free source SDK; the local dashboard is a demo, not a provider proxy or hosted enforcement service.
 
@@ -12,7 +12,7 @@ A sequential session circuit breaker for repeated tool requests, cycles, attempt
 | Python async clients / streaming | rejected | streaming rejected |
 | Responses API, streaming helper APIs, LangChain/LangGraph enforcement | unsupported; do not route protected work through these APIs | unsupported |
 
-Each guard admits one model request at a time; overlaps throw before provider dispatch. Manual tools require a matching before/after pair; overlapping calls and unmatched completions throw. Use separate guards for separate sessions. `max_depth`/`maxDepth` counts attempted calls, not recursive stack depth. Adapters observe requested tools independently from actual execution. Repeated successful polling can trip too.
+Each guard admits one model request at a time; overlaps throw before provider dispatch. Manual tools require a matching before/after pair; overlapping calls and unmatched completions throw. Use separate guards for separate sessions. `max_depth`/`maxDepth` counts attempted calls, not recursive stack depth. Adapters observe requested tools independently from actual execution. Use `loop_exempt_tools` / `loopExemptTools` for deliberate polling; exemptions bypass repetition detection only.
 
 Budgets use returned provider usage: a request can exceed the remaining budget before it returns. There is no reservation, cancellation, shared ledger, or hard dollar cap. Subsequent wrapped requests are blocked, including tool-less calls. Missing provider usage cannot be charged automatically. Manual tool costs are additional costs; do not record the same provider cost twice. Reset preserves spend and refuses exhausted budgets or in-flight work; create a new session for a new budget.
 
@@ -52,4 +52,14 @@ Static paths are contained in the static directory. Ingestion is limited to 64 K
 
 `cd packages/typescript && npm ci && npm run build && node --test tests/audit.cjs`
 
-All examples and regression checks use fake providers; no API key is needed.
+All examples and regression checks use local controlled providers; no provider account or paid call is needed.
+
+## 0.3.0 dispatch limits and compatibility
+
+`TripPolicy(max_provider_attempts=100, loop_exempt_tools=["poll_job"])` / `{ maxProviderAttempts: 100, loopExemptTools: ["poll_job"] }` caps admitted wrapper calls, including tool-less replies and errors. Dispatch N+1 is blocked; reset does not replenish attempts. Disable SDK internal retries (`max_retries=0` / `maxRetries: 0`) to make this also an HTTP-attempt cap. Exempt tools still consume depth, attempts and reported budget; other signatures retain repetition checks.
+
+Telemetry reports `unaccounted_provider_attempts` / `unaccountedProviderAttempts` for errors and missing/invalid usage. Spend is only a partial estimate when this is nonzero. A custom `None` / `undefined` fallback suppresses the response that caused the trip as well as later calls.
+
+Local real-SDK compatibility tests pin Python `openai==1.84.0`, `anthropic==0.52.2`, `httpx==0.28.1`, and Node `openai@4.104.0`, `@anthropic-ai/sdk@0.54.0`. Tested on Python 3.12.3 and Node 24.15.0; native source tests use Bun 1.3.12. Other SDK versions are unverified. Tested modes are synchronous Python / Promise Node, non-streaming Chat Completions and Messages. Anthropic cache creation, streaming, Python async, Responses API and Node SDK response helpers remain unsupported.
+
+The source checkout includes `COMPATIBILITY.md`, pinned SDK test commands, and the opt-in `examples/metadata_incident_exporter.py` allowlist example. It needs an explicit HTTPS endpoint/token and exports no prompts, outputs, arguments, signatures or session identifiers. There is no hosted collector in this release.

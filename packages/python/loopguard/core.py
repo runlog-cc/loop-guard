@@ -29,6 +29,7 @@ class TripReason(str, Enum):
     CYCLE_DETECTED = "cycle_detected"
     BUDGET_EXCEEDED = "budget_exceeded"
     MAX_DEPTH_EXCEEDED = "max_depth_exceeded"
+    MAX_PROVIDER_ATTEMPTS_EXCEEDED = "max_provider_attempts_exceeded"
     MANUAL_HALT = "manual_halt"
 
 
@@ -37,6 +38,8 @@ class TripPolicy:
     """Policy configurations governing when the circuit breaker trips."""
     max_consecutive_retries: int = 3
     max_depth: int = 20
+    max_provider_attempts: int = 100
+    loop_exempt_tools: List[str] = field(default_factory=list)
     max_cost_usd: float = 2.00
     detect_cycles: bool = True
     max_cycle_length: int = 4
@@ -147,6 +150,12 @@ class CircuitBreaker:
     ):
         self.session_id: str = session_id or f"sess_{uuid.uuid4().hex[:12]}"
         self.policy: TripPolicy = policy or TripPolicy()
+        if isinstance(self.policy.max_provider_attempts, bool) or not isinstance(self.policy.max_provider_attempts, int) or self.policy.max_provider_attempts < 1:
+            raise ValueError("max_provider_attempts must be a positive finite integer")
+        if not isinstance(self.policy.loop_exempt_tools, list) or not all(isinstance(n, str) for n in self.policy.loop_exempt_tools):
+            raise ValueError("loop_exempt_tools must be a list of tool names")
+        self.provider_attempts = 0
+        self.accounted_provider_attempts = 0
         self.state: CircuitState = CircuitState.CLOSED
         self.trip_reason: Optional[TripReason] = None
         self.trip_details: Optional[Dict[str, Any]] = None
@@ -208,6 +217,16 @@ class CircuitBreaker:
             )
         return None
 
+    def admit_provider_attempt(self):
+        blocked = self.ensure_active()
+        if self.state == CircuitState.TRIPPED:
+            return blocked
+        if self.provider_attempts >= self.policy.max_provider_attempts:
+            self._trip(TripReason.MAX_PROVIDER_ATTEMPTS_EXCEEDED, {"provider_attempts": self.provider_attempts, "max_provider_attempts": self.policy.max_provider_attempts})
+            return self.ensure_active()
+        self.provider_attempts += 1
+        return None
+
     def observe_tool_request(
         self,
         tool_name: str,
@@ -219,7 +238,7 @@ class CircuitBreaker:
         still use before_tool_call/after_tool_call around real tool execution.
         """
         blocked = self.ensure_active()
-        if blocked is not None:
+        if self.state == CircuitState.TRIPPED:
             return blocked
         signature = SignatureHasher.compute(tool_name, arguments)
         self.observed_signatures.append(signature)
@@ -241,7 +260,9 @@ class CircuitBreaker:
                 signature=signature,
                 details=self.trip_details or {},
             )
-        simulated_signatures = self.observed_signatures
+        if tool_name in self.policy.loop_exempt_tools:
+            return None
+        simulated_signatures = [s for s in self.observed_signatures if not any(s.startswith(n + ":") for n in self.policy.loop_exempt_tools)]
         consecutive_count = 0
         for sig in reversed(simulated_signatures):
             if sig == signature:
@@ -336,8 +357,12 @@ class CircuitBreaker:
                 details=self.trip_details or {},
             )
 
+        if tool_name in self.policy.loop_exempt_tools:
+            self._pending_signature = signature
+            return None
+
         # Check consecutive identical retries
-        simulated_signatures = self.signatures + [signature]
+        simulated_signatures = [s for s in self.signatures + [signature] if not any(s.startswith(n + ":") for n in self.policy.loop_exempt_tools)]
         consecutive_count = 0
         for sig in reversed(simulated_signatures):
             if sig == signature:
@@ -563,6 +588,9 @@ class CircuitBreaker:
             "state": self.state.value,
             "trip_reason": self.trip_reason.value if self.trip_reason else None,
             "trip_details": self.trip_details,
+            "provider_attempts": self.provider_attempts,
+            "unaccounted_provider_attempts": self.provider_attempts - self.accounted_provider_attempts,
+            "max_provider_attempts": self.policy.max_provider_attempts,
             "current_depth": self.current_depth,
             "max_depth": self.policy.max_depth,
             "budget": self.budget.get_summary(),

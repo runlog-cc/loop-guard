@@ -38,6 +38,8 @@ def wrap_anthropic(client: Any, guard: CircuitBreaker) -> Any:
                 model = kwargs.get("model", "claude-3-5-sonnet")
 
                 get_pricing_for_model(model)
+                blocked = guard.admit_provider_attempt()
+                if guard.state.value == "tripped": return blocked
                 response = orig_create(*args, **kwargs)
                 response_received = True
                 if inspect.isawaitable(response):
@@ -50,11 +52,14 @@ def wrap_anthropic(client: Any, guard: CircuitBreaker) -> Any:
                     raise ValueError("Cache creation billing unsupported; use explicit normalized usage")
                 if usage:
                     guard.record_usage(
-                        prompt_tokens=getattr(usage, "input_tokens", 0) + getattr(usage, "cache_read_input_tokens", 0),
-                        completion_tokens=getattr(usage, "output_tokens", 0),
+                        prompt_tokens=getattr(usage, "input_tokens", None) + (getattr(usage, "cache_read_input_tokens", 0) or 0),
+                        completion_tokens=getattr(usage, "output_tokens", None),
                         model=model,
-                        cached_tokens=getattr(usage, "cache_read_input_tokens", 0),
+                        cached_tokens=(getattr(usage, "cache_read_input_tokens", 0) or 0),
                     )
+
+                if usage: guard.accounted_provider_attempts += 1
+                if guard.state.value == "tripped": return guard.ensure_active()
 
                 # Intercept tool use blocks
                 content = getattr(response, "content", []) or []
@@ -64,7 +69,7 @@ def wrap_anthropic(client: Any, guard: CircuitBreaker) -> Any:
                         tool_name = getattr(block, "name", "unknown")
                         tool_input = getattr(block, "input", {})
                         fallback = guard.observe_tool_request(tool_name=tool_name, arguments=tool_input)
-                        if fallback is not None:
+                        if guard.state.value == "tripped":
                             return fallback
 
                 return response

@@ -18,18 +18,22 @@ export function wrapOpenAI<T extends Record<string, any>>(client: T, guard: Circ
       const model = params.model || "gpt-4o";
 
       getPricingForModel(model);
+      const admission = guard.admitProviderAttempt();
+      if ((guard.state as string) === "tripped") return admission;
       const response = await originalCreate(...args);
       responseReceived = true;
 
       if (response && response.usage) {
         guard.recordUsage({
-          promptTokens: response.usage.prompt_tokens ?? 0,
-          completionTokens: response.usage.completion_tokens ?? 0,
+          promptTokens: response.usage.prompt_tokens,
+          completionTokens: response.usage.completion_tokens,
           model,
           cachedTokens: response.usage.prompt_tokens_details?.cached_tokens ?? 0,
         });
       }
 
+      if (response?.usage) guard.accountedProviderAttempts++;
+      if ((guard.state as string) === "tripped") return guard.ensureActive();
       if (response && response.choices) {
         for (const choice of response.choices) {
           const toolCalls = choice.message?.tool_calls || [];
@@ -40,7 +44,7 @@ export function wrapOpenAI<T extends Record<string, any>>(client: T, guard: Circ
               // This is a provider-requested tool only. The application owns
               // the explicit beforeToolCall/afterToolCall execution lifecycle.
               const fallback = guard.observeToolRequest(toolName, toolArgs);
-              if (fallback !== null && fallback !== undefined) {
+              if ((guard.state as string) === "tripped") {
                 return fallback;
               }
             }

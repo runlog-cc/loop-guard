@@ -5,11 +5,14 @@ export type TripReason =
   | "cycle_detected"
   | "budget_exceeded"
   | "max_depth_exceeded"
+  | "max_provider_attempts_exceeded"
   | "manual_halt";
 
 export interface TripPolicy {
   maxConsecutiveRetries?: number;
   maxDepth?: number;
+  maxProviderAttempts?: number;
+  loopExemptTools?: string[];
   maxCostUsd?: number;
   detectCycles?: boolean;
   maxCycleLength?: number;
@@ -42,6 +45,9 @@ export interface SessionTelemetry {
   state: CircuitState;
   tripReason?: TripReason;
   tripDetails?: Record<string, any>;
+  providerAttempts: number;
+  unaccountedProviderAttempts: number;
+  maxProviderAttempts: number;
   currentDepth: number;
   maxDepth: number;
   budget: {
