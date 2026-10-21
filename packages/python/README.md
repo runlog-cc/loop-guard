@@ -1,6 +1,10 @@
-# Loop-Guard 0.3.0
+# Loop-Guard 0.3.1
 
 A sequential session circuit breaker for repeated tool requests, cycles, attempted-call limits, and **post-response** usage budgets. Free source SDK; the local dashboard is a demo, not a provider proxy or hosted enforcement service.
+
+## License
+
+Loop-Guard is free to use and is licensed under the MIT License. You may use, copy, modify, and redistribute it, including commercially, provided you retain the copyright and license notice. The full license is included in this Python package download. Hosted RunLog services have separate terms.
 
 ## Supported modes
 
@@ -54,7 +58,7 @@ Static paths are contained in the static directory. Ingestion is limited to 64 K
 
 All examples and regression checks use local controlled providers; no provider account or paid call is needed.
 
-## 0.3.0 dispatch limits and compatibility
+## 0.3.1 dispatch limits and compatibility
 
 `TripPolicy(max_provider_attempts=100, loop_exempt_tools=["poll_job"])` / `{ maxProviderAttempts: 100, loopExemptTools: ["poll_job"] }` caps admitted wrapper calls, including tool-less replies and errors. Dispatch N+1 is blocked; reset does not replenish attempts. Disable SDK internal retries (`max_retries=0` / `maxRetries: 0`) to make this also an HTTP-attempt cap. Exempt tools still consume depth, attempts and reported budget; other signatures retain repetition checks.
 

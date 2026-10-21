@@ -1,6 +1,6 @@
 """Loop-Guard: Real-time circuit breaker and loop prevention for AI agents."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from loopguard.alerts import AlertDispatcher
 from loopguard.budget import BudgetTracker, ModelPricing, get_pricing_for_model

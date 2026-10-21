@@ -5,18 +5,18 @@ Python and TypeScript circuit-breaker SDKs for local agent integrations. This re
 Download the wheel or npm tarball from [releases](https://github.com/runlog-cc/loop-guard/releases). Check SHA256SUMS before installing:
 
 ```sh
-curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.0/runlog_loopguard-0.3.0-py3-none-any.whl
-curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.0/runlog-loopguard-0.3.0.tgz
-curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.0/SHA256SUMS
-awk '$2 == "runlog_loopguard-0.3.0-py3-none-any.whl" || $2 == "runlog-loopguard-0.3.0.tgz" {print; count++} END {if (count != 2) exit 1}' SHA256SUMS > guard.SHA256SUMS
+curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.1/runlog_loopguard-0.3.1-py3-none-any.whl
+curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.1/runlog-loopguard-0.3.1.tgz
+curl -fLO https://github.com/runlog-cc/loop-guard/releases/download/v0.3.1/SHA256SUMS
+awk '$2 == "runlog_loopguard-0.3.1-py3-none-any.whl" || $2 == "runlog-loopguard-0.3.1.tgz" {print; count++} END {if (count != 2) exit 1}' SHA256SUMS > guard.SHA256SUMS
 sha256sum --check guard.SHA256SUMS
-pip install ./runlog_loopguard-0.3.0-py3-none-any.whl
-npm install ./runlog-loopguard-0.3.0.tgz
+pip install ./runlog_loopguard-0.3.1-py3-none-any.whl
+npm install ./runlog-loopguard-0.3.1.tgz
 ```
 
 See [Python](packages/python/README.md) and [TypeScript](packages/typescript/README.md) for integration examples. Configure retry and budget thresholds and test on your own traces before production use. Budget checks depend on observed usage; they cannot guarantee prevention of every upstream charge.
 
-## 0.3.0 dispatch limits and compatibility
+## 0.3.1 dispatch limits and compatibility
 
 `TripPolicy(max_provider_attempts=100, loop_exempt_tools=["poll_job"])` / `{ maxProviderAttempts: 100, loopExemptTools: ["poll_job"] }` caps admitted wrapper calls, including tool-less replies and errors. Dispatch N+1 is blocked; reset does not replenish attempts. Disable SDK internal retries (`max_retries=0` / `maxRetries: 0`) to make this also an HTTP-attempt cap. Exempt tools still consume depth, attempts and reported budget; other signatures retain repetition checks.
 

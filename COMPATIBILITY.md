@@ -1,4 +1,4 @@
-# Loop-Guard 0.3.0 compatibility evidence
+# Loop-Guard 0.3.1 compatibility evidence
 
 These are local controlled-transport tests of real pinned SDKs, not live-provider certification. No provider accounts or paid requests are used. The SDKs serialize requests and parse fixture HTTP responses. Versions outside this matrix are unverified.
 
