@@ -2,10 +2,7 @@
 
 Free Python and TypeScript SDKs for detecting repeated agent tool requests and
 checking returned usage. A **sequential session circuit breaker**, not a provider
-proxy or a hard dollar cap. Part of the [RunLog public toolkit](https://runlog.cc/loop-guard/),
-built and maintained by **Vasco Lacerda**.
-
-[About the developer](https://runlog.cc/about) · [Discuss a role or project](mailto:hello@runlog.cc?subject=Role%20or%20project%20discussion)
+proxy or a hard dollar cap. Part of the [RunLog public toolkit](https://runlog.cc/loop-guard/).
 
 [Offline verification workflow and runs](https://github.com/runlog-cc/loop-guard/actions/workflows/verify.yml)
 
@@ -105,3 +102,9 @@ though it were a public repository commit.
 MIT-licensed source and packages, including commercial use with the required
 notice. See [LICENSE](LICENSE). Local guarding needs no RunLog account. Private
 accounts, payments and hosted integrations remain outside the public toolkit.
+
+## Author
+
+Built and maintained by **Francisco Garrett**.
+
+[About the developer](https://runlog.cc/about) · [Discuss a role or project](mailto:hello@runlog.cc?subject=Role%20or%20project%20discussion)
